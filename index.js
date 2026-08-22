@@ -481,26 +481,39 @@ async function startBot() {
 
     // Jika belum login / terdaftar, tanyakan metode autentikasi yang diinginkan
     if (!state.creds.registered) {
-        console.log('\n=========================================');
-        console.log('       PILIHAN METODE AUTENTIKASI        ');
-        console.log('=========================================');
-        console.log('1. QR Code');
-        console.log('2. Pairing Code');
-        console.log('=========================================');
+        const envPairingNumber = process.env.PAIRING_NUMBER || process.env.PHONE_NUMBER;
+        const envUsePairing = process.env.USE_PAIRING === 'true' || Boolean(envPairingNumber);
 
-        const choice = (await askQuestion('Pilih metode login (1/2): ')).trim();
-
-        if (choice === '2') {
+        if (envUsePairing && envPairingNumber) {
             usePairingCode = true;
-            const inputNumber = await askQuestion('Masukkan nomor WhatsApp Anda (contoh: 6281234567890): ');
-            phoneNumber = inputNumber.replace(/[^0-9]/g, '');
+            phoneNumber = envPairingNumber.replace(/[^0-9]/g, '');
+            console.log(`[i] Menggunakan Pairing Code dari Environment Variable untuk nomor: ${phoneNumber}`);
+        } else if (!process.stdin.isTTY) {
+            console.log('[i] Terdeteksi lingkungan Server / Docker / Railway (Non-Interactive TTY).');
+            console.log('[i] Menampilkan QR Code di log console. (Tip: Set env PAIRING_NUMBER jika ingin Pairing Code)');
+            usePairingCode = false;
+        } else {
+            console.log('\n=========================================');
+            console.log('       PILIHAN METODE AUTENTIKASI        ');
+            console.log('=========================================');
+            console.log('1. QR Code');
+            console.log('2. Pairing Code');
+            console.log('=========================================');
 
-            if (!phoneNumber) {
-                console.log('[!] Nomor tidak valid! Mengalihkan otomatis ke metode QR Code.');
+            const choice = (await askQuestion('Pilih metode login (1/2): ')).trim();
+
+            if (choice === '2') {
+                usePairingCode = true;
+                const inputNumber = await askQuestion('Masukkan nomor WhatsApp Anda (contoh: 6281234567890): ');
+                phoneNumber = inputNumber.replace(/[^0-9]/g, '');
+
+                if (!phoneNumber) {
+                    console.log('[!] Nomor tidak valid! Mengalihkan otomatis ke metode QR Code.');
+                    usePairingCode = false;
+                }
+            } else {
                 usePairingCode = false;
             }
-        } else {
-            usePairingCode = false;
         }
     }
 
