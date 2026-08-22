@@ -212,6 +212,61 @@ async function convertVideoToSticker(videoBuffer, packName = 'TeamLoLoK', author
 }
 
 /**
+ * Konversi Buffer Stiker WebP ke Foto (PNG) atau Video (MP4 jika bergerak/animasi)
+ */
+async function convertStickerToSource(stickerBuffer, isAnimated = false) {
+    const randomId = `${Date.now()}_${Math.random().toString(36).substring(7)}`;
+    const tmpInput = path.join(os.tmpdir(), `stk_in_${randomId}.webp`);
+
+    try {
+        await fs.writeFile(tmpInput, stickerBuffer);
+
+        // Periksa apakah stiker beranimasi jika flag isAnimated belum diset
+        let animated = isAnimated;
+        if (!animated) {
+            const rawStr = stickerBuffer.toString('binary');
+            if (rawStr.includes('ANIM') || rawStr.includes('ANMF')) {
+                animated = true;
+            }
+        }
+
+        if (animated) {
+            const tmpOutput = path.join(os.tmpdir(), `stk_out_${randomId}.mp4`);
+            try {
+                // Konversi WebP Animasi -> MP4 Video (H.264, yuv420p, dimensi genap)
+                await execFilePromise('ffmpeg', [
+                    '-y',
+                    '-i', tmpInput,
+                    '-pix_fmt', 'yuv420p',
+                    '-c:v', 'libx264',
+                    '-movflags', '+faststart',
+                    '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+                    tmpOutput
+                ]);
+                const videoBuffer = await fs.readFile(tmpOutput);
+                await fs.unlink(tmpOutput).catch(() => {});
+                return { buffer: videoBuffer, isVideo: true, mimetype: 'video/mp4' };
+            } catch (err) {
+                console.error('[!] Gagal encode animated sticker ke MP4, mencoba fallback ke PNG:', err?.message || err);
+            }
+        }
+
+        // Konversi WebP Statis -> Foto PNG
+        const tmpOutput = path.join(os.tmpdir(), `stk_out_${randomId}.png`);
+        await execFilePromise('ffmpeg', [
+            '-y',
+            '-i', tmpInput,
+            tmpOutput
+        ]);
+        const imageBuffer = await fs.readFile(tmpOutput);
+        await fs.unlink(tmpOutput).catch(() => {});
+        return { buffer: imageBuffer, isVideo: false, mimetype: 'image/png' };
+    } finally {
+        await fs.unlink(tmpInput).catch(() => {});
+    }
+}
+
+/**
  * Handle Anti-Delete: Meneruskan pesan yang dihapus ke nomor privat tujuan (6285143666343)
  */
 async function handleDeletedMessage(sock, msg, protocolMessage) {
@@ -523,8 +578,9 @@ async function startBot() {
             console.log('[✓] Fitur Aktif:');
             console.log('    1. Anti View-Once : .fuckyou / .doksli');
             console.log('    2. Sticker Maker  : .s (Pack: TeamLoLoK)');
-            console.log(`    3. Anti Delete    : Private Forward ke ${OWNER_MAIN_NUMBER}`);
-            console.log('    4. Downloader     : .tt, .ig, .yt, .ytmp3, .fb, .dl');
+            console.log('    3. Sticker to Src : .tosource / .toimg / .tovid');
+            console.log(`    4. Anti Delete    : Private Forward ke ${OWNER_MAIN_NUMBER}`);
+            console.log('    5. Downloader     : .tt, .ig, .yt, .ytmp3, .fb, .dl');
             console.log('    [!] Mode Silent   : Bot 100% tidak akan merespons siapa pun selain Owner & Bot sendiri.\n');
         }
     });
@@ -580,6 +636,7 @@ async function startBot() {
                 const knownCommands = [
                     '.fuckyou', '.doksli',
                     '.s', '.sticker', '.sgif',
+                    '.tosource', '.toimg', '.tovid',
                     '.dl', '.download',
                     '.tt', '.tiktok',
                     '.ig', '.instagram',
@@ -787,7 +844,87 @@ async function startBot() {
                 }
 
                 /* =========================================================================
-                 * FITUR 3: DOWNLOADER (TikTok, IG, YouTube, Facebook, X, etc.)
+                 * FITUR 3: STICKER TO SOURCE (.tosource / .toimg / .tovid)
+                 * ========================================================================= */
+                if (command === '.tosource' || command === '.toimg' || command === '.tovid') {
+                    if (!contextInfo || !quotedMsg) {
+                        await sock.sendMessage(chatJid, {
+                            text: '⚠️ Balas / reply stiker yang ingin diubah ke foto/video dengan *.tosource*'
+                        }, { quoted: msg });
+                        continue;
+                    }
+
+                    const unwrapQuoted =
+                        quotedMsg.viewOnceMessage?.message ||
+                        quotedMsg.viewOnceMessageV2?.message ||
+                        quotedMsg.viewOnceMessageV2Extension?.message ||
+                        quotedMsg;
+
+                    const stickerMsg = unwrapQuoted.stickerMessage;
+                    if (!stickerMsg) {
+                        await sock.sendMessage(chatJid, {
+                            text: '⚠️ Pesan yang dibalas bukan stiker! Harap reply pesan stiker dengan *.tosource*'
+                        }, { quoted: msg });
+                        continue;
+                    }
+
+                    console.log(`[*] Mengunduh & mengonversi stiker ke sumber asli untuk chat: ${chatJid}...`);
+                    const quotedSender = contextInfo.participant || msg.key.participant || msg.key.remoteJid;
+
+                    const stickerBuffer = await downloadMediaMessage(
+                        {
+                            key: { remoteJid: chatJid, id: contextInfo.stanzaId, participant: quotedSender, fromMe: false },
+                            message: unwrapQuoted
+                        },
+                        'buffer',
+                        {},
+                        { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage }
+                    ).catch(() => null);
+
+                    if (!stickerBuffer) {
+                        await sock.sendMessage(chatJid, { text: '❌ Gagal mengunduh stiker. Coba ulangi beberapa saat lagi.' }, { quoted: msg });
+                        continue;
+                    }
+
+                    const isAnimated = stickerMsg.isAnimated === true;
+                    const result = await convertStickerToSource(stickerBuffer, isAnimated).catch((err) => {
+                        console.error('[!] Error convert sticker to source:', err?.message || err);
+                        return null;
+                    });
+
+                    if (!result || !result.buffer) {
+                        await sock.sendMessage(chatJid, { text: '❌ Gagal mengonversi stiker ke foto/video.' }, { quoted: msg });
+                        continue;
+                    }
+
+                    if (result.isVideo) {
+                        await sock.sendMessage(
+                            chatJid,
+                            {
+                                video: result.buffer,
+                                caption: '🎥 *Sticker to Video*',
+                                mimetype: 'video/mp4'
+                            },
+                            { quoted: msg }
+                        );
+                        console.log(`[✓] Berhasil mengirim video hasil konversi stiker ke ${chatJid}`);
+                    } else {
+                        await sock.sendMessage(
+                            chatJid,
+                            {
+                                image: result.buffer,
+                                caption: '📸 *Sticker to Photo*',
+                                mimetype: 'image/png'
+                            },
+                            { quoted: msg }
+                        );
+                        console.log(`[✓] Berhasil mengirim foto hasil konversi stiker ke ${chatJid}`);
+                    }
+                    continue;
+                }
+
+                /* =========================================================================
+                 * FITUR 4: DOWNLOADER (TikTok, IG, YouTube, Facebook, X, etc.)
                  * ========================================================================= */
                 const isDownloaderCommand = [
                     '.dl', '.download',
