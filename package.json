@@ -1,0 +1,16 @@
+{
+  "name": "wa-anti-viewonce-bot",
+  "version": "1.0.0",
+  "description": "WhatsApp Anti View-Once Bot with Baileys",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "^6.7.9",
+    "pino": "^9.6.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
