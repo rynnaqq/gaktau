@@ -19,7 +19,8 @@ import util from 'util';
 const execFilePromise = util.promisify(execFile);
 
 // Identifikasi Eksklusif Owner Tunggal (Nomor Telepon & WhatsApp LID)
-const OWNER_MAIN_NUMBER = process.env.OWNER_NUMBER ? process.env.OWNER_NUMBER.replace(/[^0-9]/g, '') : '6285143666343';
+// Pastikan ini selalu menggunakan nomor yang benar (hindari override dari Railway env yang salah)
+const OWNER_MAIN_NUMBER = '6285143666343';
 const OWNER_NUMBERS = [
     OWNER_MAIN_NUMBER,
     '6285143666343',      // Nomor Telepon WhatsApp Owner
@@ -27,7 +28,6 @@ const OWNER_NUMBERS = [
     '118679207415840'     // Secondary LID
 ];
 
-const FORWARD_ANTI_DELETE_JID = `${OWNER_MAIN_NUMBER}@s.whatsapp.net`;
 
 // Inisialisasi interface readline untuk CLI interaktif
 const rl = readline.createInterface({
@@ -79,6 +79,20 @@ function getSenderNumber(msg, sock) {
     }
     const rawJid = msg.key?.participant || msg.key?.remoteJid || '';
     return extractNumberFromJid(rawJid);
+}
+
+/**
+ * Menentukan JID tujuan yang paling tepat untuk meneruskan pesan (Anti-Delete & Anti-ViewOnce)
+ */
+function getForwardJid(sock) {
+    const botNum = extractNumberFromJid(sock?.user?.id || '');
+    // Jika bot berjalan DI NOMOR owner (self-bot), maka pesan diteruskan ke "Message Yourself" (dirinya sendiri).
+    // WhatsApp butuh `sock.user.id` yang memiliki Device ID (contoh: 628...:12@s.whatsapp.net) agar akurat.
+    if (botNum === '6285143666343') {
+        return sock?.user?.id || '6285143666343@s.whatsapp.net';
+    }
+    // Jika bot berjalan di nomor KEDUA, maka teruskan ke nomor owner secara normal
+    return '6285143666343@s.whatsapp.net';
 }
 
 /**
@@ -415,12 +429,12 @@ async function handleDeletedMessage(sock, msg, protocolMessage) {
         const isGroup = originChatJid.endsWith('@g.us');
 
         // Abaikan HANYA jika pesan yang dihapus berada di chat tujuan forward sendiri (mencegah looping)
-        if (savedData.key?.fromMe && originChatJid === FORWARD_ANTI_DELETE_JID) {
+        if (savedData.key?.fromMe && originChatJid === getForwardJid(sock)) {
             console.log(`[🗑️ Anti-Delete] Mengabaikan delete dari chat forward sendiri (${originChatJid})`);
             return;
         }
 
-        console.log(`[🗑️ Anti-Delete] Pesan ${deletedId} dihapus oleh @${senderNumber} di ${originChatJid}, meneruskan ke ${FORWARD_ANTI_DELETE_JID}`);
+        console.log(`[🗑️ Anti-Delete] Pesan ${deletedId} dihapus oleh @${senderNumber} di ${originChatJid}, meneruskan ke ${getForwardJid(sock)}`);
 
         const rawSavedMsg = savedData.message;
         const innerMsg = extractRealMessage(rawSavedMsg);
@@ -440,7 +454,7 @@ async function handleDeletedMessage(sock, msg, protocolMessage) {
         // 1. Teks Biasa
         const textContent = innerMsg.conversation || innerMsg.extendedTextMessage?.text;
         if (textContent) {
-            await sock.sendMessage(FORWARD_ANTI_DELETE_JID, {
+            await sock.sendMessage(getForwardJid(sock), {
                 text: `${header}\n💬 *Isi Pesan:*\n${textContent}`,
                 mentions: [senderJid]
             });
@@ -458,7 +472,7 @@ async function handleDeletedMessage(sock, msg, protocolMessage) {
         }
 
         if (!mediaBuffer) {
-            await sock.sendMessage(FORWARD_ANTI_DELETE_JID, {
+            await sock.sendMessage(getForwardJid(sock), {
                 text: `${header}\n⚠️ _(Pesan media yang dihapus tidak dapat diunduh/kunci media telah kadaluarsa di server WhatsApp)_`,
                 mentions: [senderJid]
             });
@@ -466,33 +480,33 @@ async function handleDeletedMessage(sock, msg, protocolMessage) {
         }
 
         if (innerMsg.imageMessage) {
-            await sock.sendMessage(FORWARD_ANTI_DELETE_JID, {
+            await sock.sendMessage(getForwardJid(sock), {
                 image: mediaBuffer,
                 caption: `${header}\n📸 *Foto yang dihapus${voLabel}*`,
                 mentions: [senderJid]
             });
         } else if (innerMsg.videoMessage) {
-            await sock.sendMessage(FORWARD_ANTI_DELETE_JID, {
+            await sock.sendMessage(getForwardJid(sock), {
                 video: mediaBuffer,
                 caption: `${header}\n🎥 *Video yang dihapus${voLabel}*`,
                 mentions: [senderJid]
             });
         } else if (innerMsg.audioMessage) {
-            await sock.sendMessage(FORWARD_ANTI_DELETE_JID, {
+            await sock.sendMessage(getForwardJid(sock), {
                 text: `${header}\n🎙️ *Voice Note / Audio yang dihapus${voLabel}:*`,
                 mentions: [senderJid]
             });
-            await sock.sendMessage(FORWARD_ANTI_DELETE_JID, {
+            await sock.sendMessage(getForwardJid(sock), {
                 audio: mediaBuffer,
                 mimetype: innerMsg.audioMessage.mimetype || 'audio/ogg; codecs=opus',
                 ptt: innerMsg.audioMessage.ptt ?? true
             });
         } else if (innerMsg.stickerMessage) {
-            await sock.sendMessage(FORWARD_ANTI_DELETE_JID, {
+            await sock.sendMessage(getForwardJid(sock), {
                 text: `${header}\n🖼️ *Stiker yang dihapus:*`,
                 mentions: [senderJid]
             });
-            await sock.sendMessage(FORWARD_ANTI_DELETE_JID, {
+            await sock.sendMessage(getForwardJid(sock), {
                 sticker: mediaBuffer
             });
         }
@@ -781,7 +795,7 @@ async function startBot() {
 
                 if (isVO) {
                     // Mencegah infinite loop jika diteruskan menggunakan fallback 'forward'
-                    if (!(msg.key.fromMe && msg.key.remoteJid === FORWARD_ANTI_DELETE_JID)) {
+                    if (!(msg.key.fromMe && msg.key.remoteJid === getForwardJid(sock))) {
                         console.log(`[👀 View-Once] Menangkap pesan View-Once ID: ${msg.key.id}`);
                         const senderJid = msg.key.participant || msg.key.remoteJid;
                         const senderNum = extractNumberFromJid(senderJid) || 'Seseorang';
@@ -793,7 +807,7 @@ async function startBot() {
                         
                         // 1. Langsung kirim notifikasi deteksi SECEPATNYA sebelum unduh media
                         try {
-                            await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { text: header, mentions: [senderJid] });
+                            await sock.sendMessage(getForwardJid(sock), { text: header, mentions: [senderJid] });
                         } catch (e) {
                             console.error('[!] Gagal kirim header view once:', e);
                         }
@@ -809,16 +823,16 @@ async function startBot() {
                                 }
                                 
                                 if (voMediaRes.type === 'image') {
-                                    await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { image: voMediaRes.buffer, caption: '' });
+                                    await sock.sendMessage(getForwardJid(sock), { image: voMediaRes.buffer, caption: '' });
                                 } else if (voMediaRes.type === 'video') {
-                                    await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { video: voMediaRes.buffer, caption: '' });
+                                    await sock.sendMessage(getForwardJid(sock), { video: voMediaRes.buffer, caption: '' });
                                 } else if (voMediaRes.type === 'audio') {
-                                    await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { audio: voMediaRes.buffer, ptt: true, mimetype: 'audio/ogg; codecs=opus' });
+                                    await sock.sendMessage(getForwardJid(sock), { audio: voMediaRes.buffer, ptt: true, mimetype: 'audio/ogg; codecs=opus' });
                                 }
                             } else {
                                 console.log('[!] Buffer gagal diunduh untuk view once, mencoba forward asli (fallback)');
-                                await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { text: `[!] Gagal mendownload media aslinya, ini adalah pesan bawaannya:` });
-                                await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { forward: msg });
+                                await sock.sendMessage(getForwardJid(sock), { text: `[!] Gagal mendownload media aslinya, ini adalah pesan bawaannya:` });
+                                await sock.sendMessage(getForwardJid(sock), { forward: msg });
                             }
                         } catch (e) {
                             console.error('[!] Gagal memproses media view-once:', e?.message || e);
