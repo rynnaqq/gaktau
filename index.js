@@ -948,23 +948,22 @@ async function startBot() {
                             chatJid,
                             {
                                 video: result.buffer,
-                                caption: '🎥 *Sticker to Video*',
+                                gifPlayback: true,
                                 mimetype: 'video/mp4'
                             },
                             { quoted: msg }
                         );
-                        console.log(`[✓] Berhasil mengirim video hasil konversi stiker ke ${chatJid}`);
+                        console.log(`[✓] Berhasil mengirim video/GIF hasil konversi stiker ke ${chatJid} (Tanpa Caption)`);
                     } else {
                         await sock.sendMessage(
                             chatJid,
                             {
                                 image: result.buffer,
-                                caption: '📸 *Sticker to Photo*',
                                 mimetype: 'image/png'
                             },
                             { quoted: msg }
                         );
-                        console.log(`[✓] Berhasil mengirim foto hasil konversi stiker ke ${chatJid}`);
+                        console.log(`[✓] Berhasil mengirim foto hasil konversi stiker ke ${chatJid} (Tanpa Caption)`);
                     }
                     continue;
                 }
