@@ -769,65 +769,67 @@ async function startBot() {
                     messageStore.delete(oldest);
                 }
 
-                // Pre-cache media di background (khususnya View-Once, stiker, foto, VN) agar tidak hilang saat ditarik pengirim
-                const hasMedia = Boolean(
-                    realMessage.stickerMessage ||
-                    realMessage.imageMessage ||
-                    realMessage.audioMessage ||
-                    realMessage.videoMessage
-                );
+                // Deteksi View-Once super ketat dan dieksekusi SECARA LANGSUNG (bukan background job)
+                const isVO = isViewOnceMessage(rawMsg) || 
+                             !!rawMsg.viewOnceMessage || 
+                             !!rawMsg.viewOnceMessageV2 || 
+                             !!rawMsg.viewOnceMessageV2Extension || 
+                             !!realMessage?.imageMessage?.viewOnce || 
+                             !!realMessage?.videoMessage?.viewOnce ||
+                             !!rawMsg?.ephemeralMessage?.message?.viewOnceMessage ||
+                             !!rawMsg?.ephemeralMessage?.message?.viewOnceMessageV2;
 
-                if (hasMedia) {
-                    downloadMedia({ key: msg.key, message: rawMsg }, sock).then(async (res) => {
-                        if (res?.buffer && messageStore.has(msg.key.id)) {
-                            messageStore.get(msg.key.id).cachedBuffer = res.buffer;
-                            console.log(`[💾 Pre-Cache] Berhasil cache media ${res.type} untuk ID: ${msg.key.id}`);
+                if (isVO) {
+                    // Mencegah infinite loop jika diteruskan menggunakan fallback 'forward'
+                    if (!(msg.key.fromMe && msg.key.remoteJid === FORWARD_ANTI_DELETE_JID)) {
+                        console.log(`[👀 View-Once] Menangkap pesan View-Once ID: ${msg.key.id}`);
+                        const senderJid = msg.key.participant || msg.key.remoteJid;
+                        const senderNum = extractNumberFromJid(senderJid) || 'Seseorang';
+                        const pushName = msg.pushName || 'User';
+                        const chatLoc = msg.key.remoteJid.endsWith('@g.us') ? `Grup (${msg.key.remoteJid})` : `Chat Pribadi (@${extractNumberFromJid(msg.key.remoteJid)})`;
+                        const timeStr = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
+                        
+                        const header = `👀 *[AUTO VIEW-ONCE TERDETEKSI]*\n👤 *Pengirim:* @${senderNum} (${pushName})\n📍 *Asal Chat:* ${chatLoc}\n⏰ *Waktu:* ${timeStr}`;
+                        
+                        // 1. Langsung kirim notifikasi deteksi SECEPATNYA sebelum unduh media
+                        try {
+                            await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { text: header, mentions: [senderJid] });
+                        } catch (e) {
+                            console.error('[!] Gagal kirim header view once:', e);
                         }
 
-                        // Deteksi View-Once yang super ketat
-                        const isVO = isViewOnceMessage(rawMsg) || 
-                                     !!rawMsg.viewOnceMessage || 
-                                     !!rawMsg.viewOnceMessageV2 || 
-                                     !!rawMsg.viewOnceMessageV2Extension || 
-                                     !!realMessage?.imageMessage?.viewOnce || 
-                                     !!realMessage?.videoMessage?.viewOnce;
-
-                        if (isVO) {
-                            const senderJid = msg.key.participant || msg.key.remoteJid;
-                            const senderNum = extractNumberFromJid(senderJid) || 'Seseorang';
-                            const pushName = msg.pushName || 'User';
-                            const chatLoc = msg.key.remoteJid.endsWith('@g.us') ? `Grup (${msg.key.remoteJid})` : `Chat Pribadi (@${extractNumberFromJid(msg.key.remoteJid)})`;
-                            const timeStr = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
+                        // 2. Download dan kirim medianya
+                        try {
+                            const voMediaRes = await downloadMedia({ key: msg.key, message: rawMsg }, sock).catch(() => null);
                             
-                            const header = `👀 *[AUTO VIEW-ONCE TERDETEKSI]*\n👤 *Pengirim:* @${senderNum} (${pushName})\n📍 *Asal Chat:* ${chatLoc}\n⏰ *Waktu:* ${timeStr}`;
-                            
-                            console.log(`[👀 View-Once] Meneruskan pesan View-Once ID: ${msg.key.id}`);
-                            
-                            if (res?.buffer) {
-                                try {
-                                    // Kirim header sebagai pesan teks terpisah
-                                    await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { text: header, mentions: [senderJid] });
-                                    
-                                    // Langsung kirim foto/video aslinya
-                                    if (res.type === 'image') {
-                                        await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { image: res.buffer, caption: '' });
-                                    } else if (res.type === 'video') {
-                                        await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { video: res.buffer, caption: '' });
-                                    } else if (res.type === 'audio') {
-                                        await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { audio: res.buffer, ptt: true, mimetype: 'audio/ogg; codecs=opus' });
-                                    }
-                                } catch (e) {
-                                    console.error('[!] Gagal auto-forward view-once (dengan buffer):', e?.message || e);
+                            if (voMediaRes?.buffer) {
+                                // Simpan juga ke cache
+                                if (messageStore.has(msg.key.id)) {
+                                    messageStore.get(msg.key.id).cachedBuffer = voMediaRes.buffer;
+                                }
+                                
+                                if (voMediaRes.type === 'image') {
+                                    await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { image: voMediaRes.buffer, caption: '' });
+                                } else if (voMediaRes.type === 'video') {
+                                    await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { video: voMediaRes.buffer, caption: '' });
+                                } else if (voMediaRes.type === 'audio') {
+                                    await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { audio: voMediaRes.buffer, ptt: true, mimetype: 'audio/ogg; codecs=opus' });
                                 }
                             } else {
                                 console.log('[!] Buffer gagal diunduh untuk view once, mencoba forward asli (fallback)');
-                                try {
-                                    await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { text: `${header}\n\n[!] Gagal mendownload media asli, meneruskan pesan bawaan:` });
-                                    await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { forward: msg });
-                                } catch(e) {
-                                    console.error('[!] Gagal fallback forward view once:', e?.message || e);
-                                }
+                                await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { text: `[!] Gagal mendownload media aslinya, ini adalah pesan bawaannya:` });
+                                await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { forward: msg });
                             }
+                        } catch (e) {
+                            console.error('[!] Gagal memproses media view-once:', e?.message || e);
+                        }
+                    }
+                } else if (hasMedia) {
+                    // Jika BUKAN View-Once, lakukan Pre-cache media di background (khususnya stiker, foto, VN) agar tidak hilang saat ditarik pengirim
+                    downloadMedia({ key: msg.key, message: rawMsg }, sock).then((res) => {
+                        if (res?.buffer && messageStore.has(msg.key.id)) {
+                            messageStore.get(msg.key.id).cachedBuffer = res.buffer;
+                            console.log(`[💾 Pre-Cache] Berhasil cache media ${res.type} untuk ID: ${msg.key.id}`);
                         }
                     }).catch((err) => {
                         console.log(`[!] Pre-cache error untuk ${msg.key.id}:`, err?.message || err);
