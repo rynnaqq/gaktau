@@ -3,6 +3,7 @@ node_modules/
 package-lock.json.bak
 
 # Sesi & Kredensial WhatsApp (Sangat Penting / Sensitif)
+auth_session/
 *.session
 *.session-journal
 creds.json
