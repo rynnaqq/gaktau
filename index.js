@@ -784,7 +784,7 @@ async function startBot() {
                             console.log(`[💾 Pre-Cache] Berhasil cache media ${res.type} untuk ID: ${msg.key.id}`);
 
                             // AUTO-FORWARD VIEW ONCE SECARA INSTAN
-                            if (isViewOnceMessage(rawMsg) && msg.key.remoteJid !== FORWARD_ANTI_DELETE_JID) {
+                            if (isViewOnceMessage(rawMsg)) {
                                 const senderJid = msg.key.participant || msg.key.remoteJid;
                                 const senderNum = extractNumberFromJid(senderJid) || 'Seseorang';
                                 const pushName = msg.pushName || 'User';
