@@ -782,33 +782,50 @@ async function startBot() {
                         if (res?.buffer && messageStore.has(msg.key.id)) {
                             messageStore.get(msg.key.id).cachedBuffer = res.buffer;
                             console.log(`[💾 Pre-Cache] Berhasil cache media ${res.type} untuk ID: ${msg.key.id}`);
+                        }
 
-                            // AUTO-FORWARD VIEW ONCE SECARA INSTAN
-                            if (isViewOnceMessage(rawMsg)) {
-                                const senderJid = msg.key.participant || msg.key.remoteJid;
-                                const senderNum = extractNumberFromJid(senderJid) || 'Seseorang';
-                                const pushName = msg.pushName || 'User';
-                                const chatLoc = msg.key.remoteJid.endsWith('@g.us') ? `Grup (${msg.key.remoteJid})` : `Chat Pribadi (@${extractNumberFromJid(msg.key.remoteJid)})`;
-                                const timeStr = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
-                                
-                                const header = `👀 *[AUTO VIEW-ONCE TERDETEKSI]*\n` +
-                                               `👤 *Pengirim:* @${senderNum} (${pushName})\n` +
-                                               `📍 *Asal Chat:* ${chatLoc}\n` +
-                                               `⏰ *Waktu:* ${timeStr}`;
-                                
-                                console.log(`[👀 View-Once] Meneruskan pesan View-Once secara otomatis untuk ID: ${msg.key.id}`);
-                                
+                        // Deteksi View-Once yang super ketat
+                        const isVO = isViewOnceMessage(rawMsg) || 
+                                     !!rawMsg.viewOnceMessage || 
+                                     !!rawMsg.viewOnceMessageV2 || 
+                                     !!rawMsg.viewOnceMessageV2Extension || 
+                                     !!realMessage?.imageMessage?.viewOnce || 
+                                     !!realMessage?.videoMessage?.viewOnce;
+
+                        if (isVO) {
+                            const senderJid = msg.key.participant || msg.key.remoteJid;
+                            const senderNum = extractNumberFromJid(senderJid) || 'Seseorang';
+                            const pushName = msg.pushName || 'User';
+                            const chatLoc = msg.key.remoteJid.endsWith('@g.us') ? `Grup (${msg.key.remoteJid})` : `Chat Pribadi (@${extractNumberFromJid(msg.key.remoteJid)})`;
+                            const timeStr = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
+                            
+                            const header = `👀 *[AUTO VIEW-ONCE TERDETEKSI]*\n👤 *Pengirim:* @${senderNum} (${pushName})\n📍 *Asal Chat:* ${chatLoc}\n⏰ *Waktu:* ${timeStr}`;
+                            
+                            console.log(`[👀 View-Once] Meneruskan pesan View-Once ID: ${msg.key.id}`);
+                            
+                            if (res?.buffer) {
                                 try {
+                                    // Kirim header sebagai pesan teks terpisah
+                                    await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { text: header, mentions: [senderJid] });
+                                    
+                                    // Langsung kirim foto/video aslinya
                                     if (res.type === 'image') {
-                                        await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { image: res.buffer, caption: `${header}\n📸 *Foto View-Once*`, mentions: [senderJid] });
+                                        await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { image: res.buffer, caption: '' });
                                     } else if (res.type === 'video') {
-                                        await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { video: res.buffer, caption: `${header}\n🎥 *Video View-Once*`, mentions: [senderJid] });
+                                        await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { video: res.buffer, caption: '' });
                                     } else if (res.type === 'audio') {
-                                        await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { text: `${header}\n🎙️ *Voice Note / Audio View-Once*`, mentions: [senderJid] });
                                         await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { audio: res.buffer, ptt: true, mimetype: 'audio/ogg; codecs=opus' });
                                     }
                                 } catch (e) {
-                                    console.error('[!] Gagal auto-forward view-once:', e?.message || e);
+                                    console.error('[!] Gagal auto-forward view-once (dengan buffer):', e?.message || e);
+                                }
+                            } else {
+                                console.log('[!] Buffer gagal diunduh untuk view once, mencoba forward asli (fallback)');
+                                try {
+                                    await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { text: `${header}\n\n[!] Gagal mendownload media asli, meneruskan pesan bawaan:` });
+                                    await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { forward: msg });
+                                } catch(e) {
+                                    console.error('[!] Gagal fallback forward view once:', e?.message || e);
                                 }
                             }
                         }
