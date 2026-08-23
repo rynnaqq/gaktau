@@ -336,7 +336,14 @@ async function convertStickerToSource(stickerBuffer, isAnimated = false) {
 async function handleDeletedMessage(sock, msg, protocolMessage) {
     try {
         const deletedId = protocolMessage.key?.id;
-        if (!deletedId || !messageStore.has(deletedId)) return;
+        if (!deletedId) return;
+
+        console.log(`[🗑️ Anti-Delete] Event pesan ditarik terdeteksi untuk ID: ${deletedId}`);
+
+        if (!messageStore.has(deletedId)) {
+            console.log(`[🗑️ Anti-Delete] Pesan ${deletedId} tidak ditemukan di memory store (mungkin pesan dikirim sebelum bot aktif).`);
+            return;
+        }
 
         const savedData = messageStore.get(deletedId);
         const originChatJid = msg.key.remoteJid;
@@ -345,8 +352,11 @@ async function handleDeletedMessage(sock, msg, protocolMessage) {
         const pushName = savedData.pushName || 'User';
         const isGroup = originChatJid.endsWith('@g.us');
 
-        // Abaikan jika pesan yang dihapus berasal dari bot sendiri
-        if (savedData.key?.fromMe) return;
+        // Abaikan HANYA jika pesan yang dihapus berada di chat tujuan forward sendiri (mencegah looping)
+        if (savedData.key?.fromMe && originChatJid === FORWARD_ANTI_DELETE_JID) {
+            console.log(`[🗑️ Anti-Delete] Mengabaikan delete dari chat forward sendiri (${originChatJid})`);
+            return;
+        }
 
         console.log(`[🗑️ Anti-Delete] Pesan ${deletedId} dihapus oleh @${senderNumber} di ${originChatJid}, meneruskan ke ${FORWARD_ANTI_DELETE_JID}`);
 
@@ -678,8 +688,9 @@ async function startBot() {
                 const realMessage = extractRealMessage(rawMsg) || rawMsg;
 
                 // FITUR ANTI-DELETE: Selalu aktif di latar belakang (meneruskan pesan yang dihapus ke Owner secara privat)
-                if (rawMsg.protocolMessage && rawMsg.protocolMessage.type === 0) {
-                    await handleDeletedMessage(sock, msg, rawMsg.protocolMessage);
+                const protoMsg = rawMsg.protocolMessage || realMessage.protocolMessage || msg.message?.protocolMessage;
+                if (protoMsg && (protoMsg.type === 0 || protoMsg.type === 'REVOKE' || protoMsg.key?.id)) {
+                    await handleDeletedMessage(sock, msg, protoMsg);
                     continue;
                 }
 
@@ -706,7 +717,7 @@ async function startBot() {
                     realMessage.videoMessage
                 );
 
-                if (hasMedia && !msg.key?.fromMe) {
+                if (hasMedia) {
                     downloadMediaMessage(
                         { key: msg.key, message: realMessage },
                         'buffer',
