@@ -3,7 +3,8 @@ import makeWASocket, {
     DisconnectReason,
     fetchLatestBaileysVersion,
     makeCacheableSignalKeyStore,
-    downloadMediaMessage
+    downloadMediaMessage,
+    downloadContentFromMessage
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
@@ -135,6 +136,64 @@ function isViewOnceMessage(rawMsg) {
         return true;
     }
     return false;
+}
+
+/**
+ * Mengunduh dan mendekripsi stream media WhatsApp menjadi Buffer secara langsung via downloadContentFromMessage
+ */
+async function getMediaBufferDirect(mediaObj, type) {
+    if (!mediaObj || !mediaObj.mediaKey) return null;
+    try {
+        const stream = await downloadContentFromMessage(mediaObj, type);
+        let buffer = Buffer.from([]);
+        for await (const chunk of stream) {
+            buffer = Buffer.concat([buffer, chunk]);
+        }
+        return buffer;
+    } catch (err) {
+        console.error(`[!] Error direct download (${type}):`, err?.message || err);
+        return null;
+    }
+}
+
+/**
+ * Mengunduh media dari pesan (View-Once, gambar, video, audio, stiker) dengan multi-level fallback
+ */
+async function downloadMedia(rawMsgObj, sock) {
+    if (!rawMsgObj) return null;
+    const rawMsg = rawMsgObj.message || rawMsgObj;
+    const realMsg = extractRealMessage(rawMsg) || rawMsg;
+
+    if (realMsg.imageMessage) {
+        const buf = await getMediaBufferDirect(realMsg.imageMessage, 'image');
+        if (buf) return { buffer: buf, type: 'image', msg: realMsg.imageMessage };
+    }
+    if (realMsg.videoMessage) {
+        const buf = await getMediaBufferDirect(realMsg.videoMessage, 'video');
+        if (buf) return { buffer: buf, type: 'video', msg: realMsg.videoMessage };
+    }
+    if (realMsg.audioMessage) {
+        const buf = await getMediaBufferDirect(realMsg.audioMessage, 'audio');
+        if (buf) return { buffer: buf, type: 'audio', msg: realMsg.audioMessage };
+    }
+    if (realMsg.stickerMessage) {
+        const buf = await getMediaBufferDirect(realMsg.stickerMessage, 'sticker');
+        if (buf) return { buffer: buf, type: 'sticker', msg: realMsg.stickerMessage };
+    }
+
+    // Fallback: downloadMediaMessage Baileys
+    try {
+        const buf = await downloadMediaMessage(
+            { key: rawMsgObj.key, message: realMsg },
+            'buffer',
+            {},
+            { logger: pino({ level: 'silent' }), reuploadRequest: sock?.updateMediaMessage }
+        ).catch(() => null);
+
+        if (buf) return { buffer: buf, type: 'unknown', msg: realMsg };
+    } catch {}
+
+    return null;
 }
 
 /**
@@ -385,15 +444,14 @@ async function handleDeletedMessage(sock, msg, protocolMessage) {
             return;
         }
 
-        // 2. Pesan Media (Gambar, Video, Audio, Stiker)
+        // 2. Pesan Media (View-Once, Gambar, Video, Audio, Stiker)
         let mediaBuffer = savedData.cachedBuffer;
         if (!mediaBuffer) {
-            mediaBuffer = await downloadMediaMessage(
-                { key: savedData.key, message: innerMsg },
-                'buffer',
-                {},
-                { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage }
-            ).catch(() => null);
+            console.log(`[*] cachedBuffer belum ada untuk ${deletedId}, mencoba download langsung via downloadMedia...`);
+            const downloaded = await downloadMedia({ key: savedData.key, message: rawSavedMsg }, sock);
+            if (downloaded) {
+                mediaBuffer = downloaded.buffer;
+            }
         }
 
         if (!mediaBuffer) {
@@ -717,28 +775,13 @@ async function startBot() {
                 );
 
                 if (hasMedia) {
-                    downloadMediaMessage(
-                        { key: msg.key, message: realMessage },
-                        'buffer',
-                        {},
-                        { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage }
-                    ).then((buf) => {
-                        if (buf && messageStore.has(msg.key.id)) {
-                            messageStore.get(msg.key.id).cachedBuffer = buf;
-                            console.log(`[💾 Pre-Cache] Berhasil cache media (${msg.key.id})`);
+                    downloadMedia({ key: msg.key, message: rawMsg }, sock).then((res) => {
+                        if (res?.buffer && messageStore.has(msg.key.id)) {
+                            messageStore.get(msg.key.id).cachedBuffer = res.buffer;
+                            console.log(`[💾 Pre-Cache] Berhasil cache media ${res.type} untuk ID: ${msg.key.id}`);
                         }
-                    }).catch(() => {
-                        downloadMediaMessage(
-                            { key: msg.key, message: rawMsg },
-                            'buffer',
-                            {},
-                            { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage }
-                        ).then((buf) => {
-                            if (buf && messageStore.has(msg.key.id)) {
-                                messageStore.get(msg.key.id).cachedBuffer = buf;
-                                console.log(`[💾 Pre-Cache Fallback] Berhasil cache media (${msg.key.id})`);
-                            }
-                        }).catch(() => {});
+                    }).catch((err) => {
+                        console.log(`[!] Pre-cache error untuk ${msg.key.id}:`, err?.message || err);
                     });
                 }
 
