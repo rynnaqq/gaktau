@@ -217,9 +217,19 @@ async function convertVideoToSticker(videoBuffer, packName = 'TeamLoLoK', author
 async function convertStickerToSource(stickerBuffer, isAnimated = false) {
     const randomId = `${Date.now()}_${Math.random().toString(36).substring(7)}`;
     const tmpInput = path.join(os.tmpdir(), `stk_in_${randomId}.webp`);
+    const tmpStripped = path.join(os.tmpdir(), `stk_str_${randomId}.webp`);
 
     try {
         await fs.writeFile(tmpInput, stickerBuffer);
+
+        // Bersihkan EXIF metadata agar file WebP murni dan tidak menyebabkan error pada decoder
+        let fileToProcess = tmpInput;
+        try {
+            await execFilePromise('webpmux', ['-strip', 'exif', tmpInput, '-o', tmpStripped]);
+            fileToProcess = tmpStripped;
+        } catch {
+            fileToProcess = tmpInput;
+        }
 
         // Periksa apakah stiker beranimasi jika flag isAnimated belum diset
         let animated = isAnimated;
@@ -230,39 +240,62 @@ async function convertStickerToSource(stickerBuffer, isAnimated = false) {
             }
         }
 
+        // 1. Jika Animasi, coba konversi ke MP4 Video terlebih dahulu
         if (animated) {
-            const tmpOutput = path.join(os.tmpdir(), `stk_out_${randomId}.mp4`);
+            const tmpMp4 = path.join(os.tmpdir(), `stk_out_${randomId}.mp4`);
             try {
                 // Konversi WebP Animasi -> MP4 Video (H.264, yuv420p, dimensi genap)
                 await execFilePromise('ffmpeg', [
                     '-y',
-                    '-i', tmpInput,
+                    '-i', fileToProcess,
                     '-pix_fmt', 'yuv420p',
                     '-c:v', 'libx264',
                     '-movflags', '+faststart',
                     '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
-                    tmpOutput
+                    tmpMp4
                 ]);
-                const videoBuffer = await fs.readFile(tmpOutput);
-                await fs.unlink(tmpOutput).catch(() => {});
+                const videoBuffer = await fs.readFile(tmpMp4);
+                await fs.unlink(tmpMp4).catch(() => {});
                 return { buffer: videoBuffer, isVideo: true, mimetype: 'video/mp4' };
             } catch (err) {
-                console.error('[!] Gagal encode animated sticker ke MP4, mencoba fallback ke PNG:', err?.message || err);
+                console.error('[!] Gagal encode animated sticker ke MP4, mencoba fallback ke gambar (dwebp/webpmux):', err?.message || err);
             }
         }
 
-        // Konversi WebP Statis -> Foto PNG
-        const tmpOutput = path.join(os.tmpdir(), `stk_out_${randomId}.png`);
-        await execFilePromise('ffmpeg', [
-            '-y',
-            '-i', tmpInput,
-            tmpOutput
-        ]);
-        const imageBuffer = await fs.readFile(tmpOutput);
-        await fs.unlink(tmpOutput).catch(() => {});
-        return { buffer: imageBuffer, isVideo: false, mimetype: 'image/png' };
+        // 2. Konversi ke Foto PNG
+        const tmpPng = path.join(os.tmpdir(), `stk_out_${randomId}.png`);
+
+        // Coba pakai dwebp (Google libwebp native, sangat cepat & akurat untuk WebP -> PNG)
+        try {
+            await execFilePromise('dwebp', [fileToProcess, '-o', tmpPng]);
+            const imageBuffer = await fs.readFile(tmpPng);
+            await fs.unlink(tmpPng).catch(() => {});
+            return { buffer: imageBuffer, isVideo: false, mimetype: 'image/png' };
+        } catch {
+            // Jika dwebp gagal (misal jika file animasi multi-frame), ekstrak frame 1 via webpmux
+            if (animated) {
+                const tmpFrame = path.join(os.tmpdir(), `stk_f1_${randomId}.webp`);
+                try {
+                    await execFilePromise('webpmux', ['-get', 'frame', '1', fileToProcess, '-o', tmpFrame]);
+                    await execFilePromise('dwebp', [tmpFrame, '-o', tmpPng]);
+                    const imageBuffer = await fs.readFile(tmpPng);
+                    await fs.unlink(tmpFrame).catch(() => {});
+                    await fs.unlink(tmpPng).catch(() => {});
+                    return { buffer: imageBuffer, isVideo: false, mimetype: 'image/png' };
+                } catch {
+                    await fs.unlink(tmpFrame).catch(() => {});
+                }
+            }
+
+            // Fallback terakhir: ffmpeg standar
+            await execFilePromise('ffmpeg', ['-y', '-i', fileToProcess, tmpPng]);
+            const imageBuffer = await fs.readFile(tmpPng);
+            await fs.unlink(tmpPng).catch(() => {});
+            return { buffer: imageBuffer, isVideo: false, mimetype: 'image/png' };
+        }
     } finally {
         await fs.unlink(tmpInput).catch(() => {});
+        await fs.unlink(tmpStripped).catch(() => {});
     }
 }
 

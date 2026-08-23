@@ -16,6 +16,8 @@ creds.json
 
 # Logs
 *.log
+logs*.json
+*.log.json
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
