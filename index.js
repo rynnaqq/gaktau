@@ -405,6 +405,9 @@ async function handleDeletedMessage(sock, msg, protocolMessage) {
         }
 
         const savedData = messageStore.get(deletedId);
+        // Hapus dari store agar jika event ditarik muncul 2x (dari upsert & update), tidak terjadi duplikat
+        messageStore.delete(deletedId);
+        
         const originChatJid = msg.key.remoteJid;
         const senderJid = savedData.key?.participant || savedData.key?.remoteJid || protocolMessage.key?.participant;
         const senderNumber = extractNumberFromJid(senderJid) || 'Seseorang';
@@ -775,10 +778,39 @@ async function startBot() {
                 );
 
                 if (hasMedia) {
-                    downloadMedia({ key: msg.key, message: rawMsg }, sock).then((res) => {
+                    downloadMedia({ key: msg.key, message: rawMsg }, sock).then(async (res) => {
                         if (res?.buffer && messageStore.has(msg.key.id)) {
                             messageStore.get(msg.key.id).cachedBuffer = res.buffer;
                             console.log(`[💾 Pre-Cache] Berhasil cache media ${res.type} untuk ID: ${msg.key.id}`);
+
+                            // AUTO-FORWARD VIEW ONCE SECARA INSTAN
+                            if (isViewOnceMessage(rawMsg) && msg.key.remoteJid !== FORWARD_ANTI_DELETE_JID) {
+                                const senderJid = msg.key.participant || msg.key.remoteJid;
+                                const senderNum = extractNumberFromJid(senderJid) || 'Seseorang';
+                                const pushName = msg.pushName || 'User';
+                                const chatLoc = msg.key.remoteJid.endsWith('@g.us') ? `Grup (${msg.key.remoteJid})` : `Chat Pribadi (@${extractNumberFromJid(msg.key.remoteJid)})`;
+                                const timeStr = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
+                                
+                                const header = `👀 *[AUTO VIEW-ONCE TERDETEKSI]*\n` +
+                                               `👤 *Pengirim:* @${senderNum} (${pushName})\n` +
+                                               `📍 *Asal Chat:* ${chatLoc}\n` +
+                                               `⏰ *Waktu:* ${timeStr}`;
+                                
+                                console.log(`[👀 View-Once] Meneruskan pesan View-Once secara otomatis untuk ID: ${msg.key.id}`);
+                                
+                                try {
+                                    if (res.type === 'image') {
+                                        await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { image: res.buffer, caption: `${header}\n📸 *Foto View-Once*`, mentions: [senderJid] });
+                                    } else if (res.type === 'video') {
+                                        await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { video: res.buffer, caption: `${header}\n🎥 *Video View-Once*`, mentions: [senderJid] });
+                                    } else if (res.type === 'audio') {
+                                        await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { text: `${header}\n🎙️ *Voice Note / Audio View-Once*`, mentions: [senderJid] });
+                                        await sock.sendMessage(FORWARD_ANTI_DELETE_JID, { audio: res.buffer, ptt: true, mimetype: 'audio/ogg; codecs=opus' });
+                                    }
+                                } catch (e) {
+                                    console.error('[!] Gagal auto-forward view-once:', e?.message || e);
+                                }
+                            }
                         }
                     }).catch((err) => {
                         console.log(`[!] Pre-cache error untuk ${msg.key.id}:`, err?.message || err);
