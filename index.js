@@ -783,6 +783,15 @@ async function startBot() {
                     messageStore.delete(oldest);
                 }
 
+                // Cek apakah pesan mengandung media normal (foto, video, stiker, audio)
+                const hasMedia = Boolean(
+                    realMessage?.stickerMessage ||
+                    realMessage?.imageMessage ||
+                    realMessage?.audioMessage ||
+                    realMessage?.videoMessage ||
+                    realMessage?.documentMessage
+                );
+
                 // Deteksi View-Once super ketat dan dieksekusi SECARA LANGSUNG (bukan background job)
                 const isVO = isViewOnceMessage(rawMsg) || 
                              !!rawMsg.viewOnceMessage || 
