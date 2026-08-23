@@ -108,6 +108,36 @@ function isOwner(msg, sock) {
 }
 
 /**
+ * Ekstrak pesan murni dari berbagai wrapper WhatsApp (Ephemeral, View-Once, dll.)
+ */
+function extractRealMessage(rawMsg) {
+    if (!rawMsg) return null;
+    let msg = rawMsg.ephemeralMessage?.message || rawMsg;
+    msg = msg.viewOnceMessage?.message ||
+          msg.viewOnceMessageV2?.message ||
+          msg.viewOnceMessageV2Extension?.message ||
+          msg.documentWithCaptionMessage?.message ||
+          msg;
+    return msg;
+}
+
+/**
+ * Memeriksa apakah suatu pesan adalah View-Once (Sekali Lihat)
+ */
+function isViewOnceMessage(rawMsg) {
+    if (!rawMsg) return false;
+    const msg = rawMsg.ephemeralMessage?.message || rawMsg;
+    if (msg.viewOnceMessage || msg.viewOnceMessageV2 || msg.viewOnceMessageV2Extension) {
+        return true;
+    }
+    const inner = extractRealMessage(rawMsg);
+    if (inner?.imageMessage?.viewOnce || inner?.videoMessage?.viewOnce || inner?.audioMessage?.viewOnce) {
+        return true;
+    }
+    return false;
+}
+
+/**
  * Membuat buffer EXIF metadata untuk stiker WhatsApp dengan nama TeamLoLoK
  */
 function createStickerExif(packName = 'TeamLoLoK', author = 'TeamLoLoK') {
@@ -320,19 +350,17 @@ async function handleDeletedMessage(sock, msg, protocolMessage) {
 
         console.log(`[🗑️ Anti-Delete] Pesan ${deletedId} dihapus oleh @${senderNumber} di ${originChatJid}, meneruskan ke ${FORWARD_ANTI_DELETE_JID}`);
 
-        const innerMsg =
-            savedData.message?.ephemeralMessage?.message ||
-            savedData.message?.viewOnceMessage?.message ||
-            savedData.message?.viewOnceMessageV2?.message ||
-            savedData.message?.viewOnceMessageV2Extension?.message ||
-            savedData.message;
+        const rawSavedMsg = savedData.message;
+        const innerMsg = extractRealMessage(rawSavedMsg);
 
         if (!innerMsg) return;
 
+        const isVO = isViewOnceMessage(rawSavedMsg);
+        const voLabel = isVO ? ' *(1x Lihat / View-Once)*' : '';
         const chatLocation = isGroup ? `Grup (${originChatJid})` : `Chat Pribadi (@${extractNumberFromJid(originChatJid)})`;
         const timeString = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
 
-        const header = `🗑️ *[ANTI-DELETE FORWARD]*\n` +
+        const header = `🗑️ *[ANTI-DELETE FORWARD${isVO ? ' - VIEW ONCE' : ''}]*\n` +
                        `👤 *Pengirim:* @${senderNumber} (${pushName})\n` +
                        `📍 *Asal Chat:* ${chatLocation}\n` +
                        `⏰ *Waktu:* ${timeString}\n`;
@@ -369,18 +397,18 @@ async function handleDeletedMessage(sock, msg, protocolMessage) {
         if (innerMsg.imageMessage) {
             await sock.sendMessage(FORWARD_ANTI_DELETE_JID, {
                 image: mediaBuffer,
-                caption: `${header}\n📸 *Foto yang dihapus*`,
+                caption: `${header}\n📸 *Foto yang dihapus${voLabel}*`,
                 mentions: [senderJid]
             });
         } else if (innerMsg.videoMessage) {
             await sock.sendMessage(FORWARD_ANTI_DELETE_JID, {
                 video: mediaBuffer,
-                caption: `${header}\n🎥 *Video yang dihapus*`,
+                caption: `${header}\n🎥 *Video yang dihapus${voLabel}*`,
                 mentions: [senderJid]
             });
         } else if (innerMsg.audioMessage) {
             await sock.sendMessage(FORWARD_ANTI_DELETE_JID, {
-                text: `${header}\n🎙️ *Voice Note / Audio yang dihapus:*`,
+                text: `${header}\n🎙️ *Voice Note / Audio yang dihapus${voLabel}:*`,
                 mentions: [senderJid]
             });
             await sock.sendMessage(FORWARD_ANTI_DELETE_JID, {
@@ -646,21 +674,19 @@ async function startBot() {
             try {
                 if (!msg.message || !msg.key?.id) continue;
 
-                // Unwrap pesan jika berada di dalam ephemeralMessage wrapper
-                const realMessage =
-                    msg.message.ephemeralMessage?.message ||
-                    msg.message;
+                const rawMsg = msg.message;
+                const realMessage = extractRealMessage(rawMsg) || rawMsg;
 
                 // FITUR ANTI-DELETE: Selalu aktif di latar belakang (meneruskan pesan yang dihapus ke Owner secara privat)
-                if (realMessage.protocolMessage && realMessage.protocolMessage.type === 0) {
-                    await handleDeletedMessage(sock, msg, realMessage.protocolMessage);
+                if (rawMsg.protocolMessage && rawMsg.protocolMessage.type === 0) {
+                    await handleDeletedMessage(sock, msg, rawMsg.protocolMessage);
                     continue;
                 }
 
                 // Simpan pesan baru ke memory store untuk Anti-Delete & Signal Retry
                 const storeItem = {
                     key: msg.key,
-                    message: msg.message,
+                    message: rawMsg,
                     pushName: msg.pushName || 'User',
                     timestamp: msg.messageTimestamp,
                     cachedBuffer: null
@@ -672,7 +698,7 @@ async function startBot() {
                     messageStore.delete(oldest);
                 }
 
-                // Pre-cache media di background (khususnya stiker, foto, VN) agar saat ditarik pengirim, file sudah tersimpan
+                // Pre-cache media di background (khususnya View-Once, stiker, foto, VN) agar tidak hilang saat ditarik pengirim
                 const hasMedia = Boolean(
                     realMessage.stickerMessage ||
                     realMessage.imageMessage ||
@@ -682,7 +708,7 @@ async function startBot() {
 
                 if (hasMedia && !msg.key?.fromMe) {
                     downloadMediaMessage(
-                        msg,
+                        { key: msg.key, message: realMessage },
                         'buffer',
                         {},
                         { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage }
