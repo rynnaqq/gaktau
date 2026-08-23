@@ -18,8 +18,9 @@ import util from 'util';
 const execFilePromise = util.promisify(execFile);
 
 // Identifikasi Eksklusif Owner Tunggal (Nomor Telepon & WhatsApp LID)
-const OWNER_MAIN_NUMBER = '6285143666343';
+const OWNER_MAIN_NUMBER = process.env.OWNER_NUMBER ? process.env.OWNER_NUMBER.replace(/[^0-9]/g, '') : '6285143666343';
 const OWNER_NUMBERS = [
+    OWNER_MAIN_NUMBER,
     '6285143666343',      // Nomor Telepon WhatsApp Owner
     '14470281740424',     // WhatsApp LID Account Owner (Grup & Linked Device)
     '118679207415840'     // Secondary LID
@@ -347,16 +348,19 @@ async function handleDeletedMessage(sock, msg, protocolMessage) {
         }
 
         // 2. Pesan Media (Gambar, Video, Audio, Stiker)
-        const mediaBuffer = await downloadMediaMessage(
-            { key: savedData.key, message: innerMsg },
-            'buffer',
-            {},
-            { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage }
-        ).catch(() => null);
+        let mediaBuffer = savedData.cachedBuffer;
+        if (!mediaBuffer) {
+            mediaBuffer = await downloadMediaMessage(
+                { key: savedData.key, message: innerMsg },
+                'buffer',
+                {},
+                { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage }
+            ).catch(() => null);
+        }
 
         if (!mediaBuffer) {
             await sock.sendMessage(FORWARD_ANTI_DELETE_JID, {
-                text: `${header}\n⚠️ _(Pesan media yang dihapus tidak dapat diunduh/kadaluarsa)_`,
+                text: `${header}\n⚠️ _(Pesan media yang dihapus tidak dapat diunduh/kunci media telah kadaluarsa di server WhatsApp)_`,
                 mentions: [senderJid]
             });
             return;
@@ -654,16 +658,39 @@ async function startBot() {
                 }
 
                 // Simpan pesan baru ke memory store untuk Anti-Delete & Signal Retry
-                messageStore.set(msg.key.id, {
+                const storeItem = {
                     key: msg.key,
                     message: msg.message,
                     pushName: msg.pushName || 'User',
-                    timestamp: msg.messageTimestamp
-                });
+                    timestamp: msg.messageTimestamp,
+                    cachedBuffer: null
+                };
+                messageStore.set(msg.key.id, storeItem);
 
                 if (messageStore.size > 2000) {
                     const oldest = messageStore.keys().next().value;
                     messageStore.delete(oldest);
+                }
+
+                // Pre-cache media di background (khususnya stiker, foto, VN) agar saat ditarik pengirim, file sudah tersimpan
+                const hasMedia = Boolean(
+                    realMessage.stickerMessage ||
+                    realMessage.imageMessage ||
+                    realMessage.audioMessage ||
+                    realMessage.videoMessage
+                );
+
+                if (hasMedia && !msg.key?.fromMe) {
+                    downloadMediaMessage(
+                        msg,
+                        'buffer',
+                        {},
+                        { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage }
+                    ).then((buf) => {
+                        if (buf && messageStore.has(msg.key.id)) {
+                            messageStore.get(msg.key.id).cachedBuffer = buf;
+                        }
+                    }).catch(() => {});
                 }
 
                 // Ambil teks pesan baik dari conversation, caption, maupun extendedTextMessage
