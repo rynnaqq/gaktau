@@ -676,10 +676,8 @@ async function startBot() {
     // Simpan kredensial sesi jika terjadi pembaruan
     sock.ev.on('creds.update', saveCreds);
 
-    // 4. Event Listener: Memproses Pesan Masuk (messages.upsert)
+    // 4. Event Listener: Memproses Pesan Masuk & Sinkronisasi (messages.upsert)
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
-        if (type !== 'notify') return;
-
         for (const msg of messages) {
             try {
                 if (!msg.message || !msg.key?.id) continue;
@@ -694,7 +692,7 @@ async function startBot() {
                     continue;
                 }
 
-                // Simpan pesan baru ke memory store untuk Anti-Delete & Signal Retry
+                // Simpan SEMUA pesan baru (baik masuk maupun keluar dari HP) ke memory store untuk Anti-Delete & Signal Retry
                 const storeItem = {
                     key: msg.key,
                     message: rawMsg,
@@ -703,8 +701,9 @@ async function startBot() {
                     cachedBuffer: null
                 };
                 messageStore.set(msg.key.id, storeItem);
+                console.log(`[📥 Store] Menyimpan pesan ID: ${msg.key.id} (fromMe: ${msg.key.fromMe}, chat: ${msg.key.remoteJid})`);
 
-                if (messageStore.size > 2000) {
+                if (messageStore.size > 2500) {
                     const oldest = messageStore.keys().next().value;
                     messageStore.delete(oldest);
                 }
@@ -726,8 +725,21 @@ async function startBot() {
                     ).then((buf) => {
                         if (buf && messageStore.has(msg.key.id)) {
                             messageStore.get(msg.key.id).cachedBuffer = buf;
+                            console.log(`[💾 Pre-Cache] Berhasil cache media (${msg.key.id})`);
                         }
-                    }).catch(() => {});
+                    }).catch(() => {
+                        downloadMediaMessage(
+                            { key: msg.key, message: rawMsg },
+                            'buffer',
+                            {},
+                            { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage }
+                        ).then((buf) => {
+                            if (buf && messageStore.has(msg.key.id)) {
+                                messageStore.get(msg.key.id).cachedBuffer = buf;
+                                console.log(`[💾 Pre-Cache Fallback] Berhasil cache media (${msg.key.id})`);
+                            }
+                        }).catch(() => {});
+                    });
                 }
 
                 // Ambil teks pesan baik dari conversation, caption, maupun extendedTextMessage
@@ -1087,6 +1099,22 @@ async function startBot() {
 
             } catch (err) {
                 console.error('[!] Error saat memproses pesan:', err?.message || err);
+            }
+        }
+    });
+
+    // 5. Event Listener: Update Status & Penghapusan Pesan (messages.update)
+    sock.ev.on('messages.update', async (updates) => {
+        for (const item of updates) {
+            try {
+                const isRevoke = item.update?.messageStubType === 68 || item.update?.message === null;
+                const updateId = item.key?.id;
+                if (isRevoke && updateId && messageStore.has(updateId)) {
+                    console.log(`[🗑️ Anti-Delete] Terdeteksi revoke via messages.update untuk ID: ${updateId}`);
+                    await handleDeletedMessage(sock, { key: item.key }, { key: item.key, type: 0 });
+                }
+            } catch (err) {
+                console.error('[!] Error di event messages.update:', err?.message || err);
             }
         }
     });
